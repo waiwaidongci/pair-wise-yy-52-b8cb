@@ -2,34 +2,40 @@
 import { useOperationsStore } from '~/stores/operations'
 
 const store = useOperationsStore()
-const { data } = await useFetch('/api/operations')
 const { reconnect } = useRealtime((event) => {
-  if (event.type === 'connection') store.connection = event.payload.startsWith('在线') ? '在线' : '重连中'
-  if (event.type === 'permit-update') store.latestAlert = event.payload
+  if (event.type === 'connection') {
+    if (event.payload.startsWith('重连')) store.markOffline()
+    else store.markOnline()
+  }
 })
 const counts = computed(() => ({
   active: store.permits.filter((item) => ['执行中', '待结束'].includes(item.status)).length,
   pending: store.permits.filter((item) => ['待复核', '待执行'].includes(item.status)).length,
   conflicts: store.permits.filter((item) => item.reviewRequired).length,
 }))
+
+async function simulateConflict() {
+  await store.simulateExternalChange()
+}
 </script>
 
 <template>
   <div class="page">
     <div class="head">
       <div><p class="eyebrow">现场安全运行</p><h1 class="page-title">隔离与作业许可总览</h1><p class="muted">设备状态、隔离锁定、跨班组冲突和许可流转集中于同一视图。</p></div>
-      <div class="inline wrap"><UButton color="gray" variant="outline" icon="i-heroicons-arrow-path" @click="reconnect">检查连接</UButton><UButton color="primary" icon="i-heroicons-document-plus" @click="navigateTo('/permits?new=1')">申请作业许可</UButton></div>
+      <div class="inline wrap"><UButton color="gray" variant="outline" icon="i-heroicons-arrow-path" @click="reconnect">检查连接</UButton><UButton color="gray" variant="outline" icon="i-heroicons-user-group" @click="simulateConflict">模拟其他班组提交</UButton><UButton color="primary" icon="i-heroicons-document-plus" @click="navigateTo('/permits?new=1')">申请作业许可</UButton></div>
     </div>
-    <UAlert v-if="store.latestAlert" class="mb-4" color="amber" variant="soft" icon="i-heroicons-exclamation-triangle" title="实时冲突提醒" :description="store.latestAlert" :actions="[{ label: '协调并确认', click: store.acceptAlert }]" />
+    <UAlert v-if="store.latestAlert" class="mb-4" color="amber" variant="soft" icon="i-heroicons-exclamation-triangle" title="实时冲突提醒" :description="store.latestAlert" :actions="[{ label: '值班负责人重新确认', click: store.acceptAlert }]" />
+    <UAlert v-if="store.pendingRetry" class="mb-4" color="blue" variant="soft" icon="i-heroicons-arrow-path" title="有未确认的操作" description="网络恢复后将从最后确认项继续，重试不会重复写入。" :actions="[{ label: '立即重试', click: store.retryPending }]" />
     <section class="grid metrics">
       <article class="panel metric"><span>执行中许可</span><strong>{{ counts.active }}</strong><small>3 个班组在场</small></article>
       <article class="panel metric"><span>待复核 / 待执行</span><strong>{{ counts.pending }}</strong><small>最早 18:00 开工</small></article>
       <article class="panel metric"><span>隔离冲突</span><strong class="danger">{{ counts.conflicts }}</strong><small>必须复核后推进</small></article>
-      <article class="panel metric"><span>设备在线</span><strong>{{ data?.onlineDevices }}/{{ data?.totalDevices }}</strong><small>平均风速 {{ data?.windSpeed }} m/s</small></article>
+      <article class="panel metric"><span>设备在线</span><strong>30/32</strong><small>平均风速 10.8 m/s</small></article>
     </section>
     <section class="grid main-grid">
       <article class="panel p-4">
-        <div class="panel-head"><div><h2>当前作业状态</h2><p class="muted">按风险和开始时间排序</p></div><UBadge color="blue" variant="subtle">版本 r{{ data?.revision }}</UBadge></div>
+        <div class="panel-head"><div><h2>当前作业状态</h2><p class="muted">按风险和开始时间排序</p></div><UBadge color="blue" variant="subtle">版本 r{{ store.revision }}</UBadge></div>
         <div class="table-scroll"><table class="data-table"><thead><tr><th>许可 / 作业</th><th>设备</th><th>负责人</th><th>时间窗</th><th>状态</th><th></th></tr></thead><tbody>
           <tr v-for="permit in store.permits" :key="permit.id"><td><b>{{ permit.id }}</b><small class="block muted">{{ permit.title }}</small></td><td>{{ permit.device }}</td><td>{{ permit.owner }} · {{ permit.crew }}</td><td>{{ permit.window }}</td><td><UBadge :color="permit.reviewRequired ? 'red' : permit.status === '执行中' ? 'green' : 'amber'" variant="subtle">{{ permit.reviewRequired ? '待复核冲突' : permit.status }}</UBadge></td><td><UButton size="xs" variant="ghost" @click="navigateTo(`/permits?id=${permit.id}`)">进入</UButton></td></tr>
         </tbody></table></div>

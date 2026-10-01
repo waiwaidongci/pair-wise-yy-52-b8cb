@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { useOperationsStore } from '~/stores/operations'
+import { useOperationsApi } from '~/composables/useOperationsApi'
 
 const store = useOperationsStore()
+const api = useOperationsApi()
 const route = useRoute()
 const open = ref(false)
 const nav = [
@@ -10,6 +12,52 @@ const nav = [
   { to: '/devices', label: '隔离与锁定', icon: 'i-heroicons-lock-closed' },
   { to: '/audit', label: '审计记录', icon: 'i-heroicons-clock' },
 ]
+
+// SSR 期间拉取服务端唯一事实源，避免首屏版本为 0
+await useAsyncData('server-state', async () => {
+  await store.fetchState()
+  return { revision: store.revision }
+})
+
+let pollTimer: ReturnType<typeof setInterval> | undefined
+let fieldTimer: ReturnType<typeof setInterval> | undefined
+
+async function refresh() {
+  try {
+    await store.fetchState()
+    store.markOnline()
+  } catch {
+    store.markOffline()
+  }
+}
+
+async function fieldActivity() {
+  // 模拟现场隔离点状态变化 → 共享该点的许可立即失效待复核
+  const states = ['已隔离', '待操作', '已恢复'] as const
+  const state = states[Math.floor(Math.random() * states.length)]!
+  try {
+    await api.setPointState('IP-413', state, '现场确认')
+    await refresh()
+  } catch { /* 网络失败忽略，下轮轮询恢复 */ }
+}
+
+function onVisible() {
+  if (document.visibilityState === 'visible') refresh()
+}
+
+onMounted(async () => {
+  await refresh()
+  await store.flush() // 从最后确认项恢复待确认队列
+  pollTimer = setInterval(refresh, 10_000)
+  fieldTimer = setInterval(fieldActivity, 40_000)
+  document.addEventListener('visibilitychange', onVisible)
+})
+
+onBeforeUnmount(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  if (fieldTimer) clearInterval(fieldTimer)
+  document.removeEventListener('visibilitychange', onVisible)
+})
 </script>
 
 <template>
@@ -26,6 +74,7 @@ const nav = [
         <UButton class="mobile-menu" icon="i-heroicons-bars-3" color="gray" variant="ghost" @click="open = !open" />
         <div><b>运行中 · A 区集电线路检修</b><span class="muted desktop-only">值班负责人：李骁 · 2026-09-29 16:48</span></div>
         <span class="flex-1" />
+        <UBadge v-if="store.revision" color="blue" variant="subtle">版本 r{{ store.revision }}</UBadge>
         <UBadge :color="store.connection === '在线' ? 'green' : 'amber'" variant="subtle">{{ store.connection }}</UBadge>
         <UButton v-if="store.pendingRetry" size="sm" color="amber" variant="soft" @click="store.retryPending">重试 {{ store.pendingRetry }} 项</UButton>
         <UButton icon="i-heroicons-plus" color="primary" @click="navigateTo('/permits?new=1')">新建许可</UButton>

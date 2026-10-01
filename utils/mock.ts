@@ -7,6 +7,7 @@ export const permits: Permit[] = [
       { id: 'IP-301', device: 'WTG-03', label: '塔基 690V 主开关', type: '开关', state: '已隔离' },
       { id: 'IP-302', device: 'BOX-03', label: '箱变低压侧刀闸', type: '刀闸', state: '已隔离' },
       { id: 'IP-303', device: 'WTG-03', label: '叶轮机械锁', type: '阀门', state: '已隔离' },
+      { id: 'IP-413', device: 'BUS-A', label: '母线侧隔离刀闸（与 LINE-A2 共用）', type: '刀闸', state: '已隔离' },
     ],
     steps: [
       { id: 'ST-01', text: '核对工作票、设备双重编号与现场标识', done: true, owner: '周野', evidence: '现场照片 2 张' },

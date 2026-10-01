@@ -11,6 +11,18 @@ const selected = computed(() => store.permits.find((item) => item.id === selecte
 const completed = computed(() => selected.value ? Math.round(selected.value.steps.filter((step) => step.done).length / selected.value.steps.length * 100) : 0)
 const statusIndex = computed(() => ['待复核', '待执行', '执行中', '待结束', '待关闭', '已完成'].indexOf(selected.value?.status ?? ''))
 
+/** 存在版本冲突（待 rebase）的许可 id 集合 */
+const conflictPermitIds = computed(() => {
+  const ids = new Set<string>()
+  for (const op of store.pendingOps) {
+    if (op.status !== 'conflict') continue
+    for (const o of op.ops) if ('permitId' in o && o.permitId) ids.add(o.permitId)
+  }
+  return ids
+})
+function hasConflict(id: string) { return conflictPermitIds.value.has(id) }
+async function rebase(id: string) { await store.rebaseAndRetry(id) }
+
 function createPermit() {
   if (!form.title.trim() || !form.device.trim()) return
   const permit: Permit = {
@@ -37,6 +49,7 @@ function createPermit() {
           <div class="detail-head"><div><small class="muted">{{ selected.id }} · 修订 r{{ selected.revision }}</small><h2>{{ selected.title }}</h2><p>{{ selected.device }} · {{ selected.window }}</p></div><UBadge size="lg" :color="selected.reviewRequired ? 'red' : 'green'" variant="subtle">{{ selected.reviewRequired ? '待复核' : selected.status }}</UBadge></div>
           <div class="flow"><div v-for="(step,index) in ['申请','复核','执行','结束','关闭']" :key="step" :class="{ done: index <= statusIndex, current: index === statusIndex }"><i>{{ index + 1 }}</i><span>{{ step }}</span></div></div>
           <UAlert v-if="selected.reviewRequired" color="red" variant="soft" title="设备状态变化触发复核" description="共用隔离点或相关设备状态已发生变化，关闭该许可前必须由值班负责人重新确认。" />
+          <UAlert v-if="hasConflict(selected.id)" color="amber" variant="soft" title="版本冲突：其他班组已修改该许可" description="本地看到的状态版本已过期，驳回仅影响该许可；重新确认后可继续处理，不会覆盖其他班组的结果。" :actions="[{ label: '重新确认并重试', click: () => rebase(selected.id) }]" />
           <h3>操作步骤</h3>
           <div v-for="step in selected.steps" :key="step.id" class="step"><UCheckbox :model-value="step.done" @update:model-value="store.toggleStep(selected.id, step.id)" /><div><b :class="{ completed: step.done }">{{ step.text }}</b><small>责任人 {{ step.owner }} · {{ step.evidence || '尚未上传证据' }}</small></div><UButton size="xs" variant="ghost" icon="i-heroicons-camera">证据</UButton></div>
           <UProgress :value="completed" class="mt-4" /><div class="inline justify-between mt-1"><span class="muted">步骤完成度</span><b>{{ completed }}%</b></div>
