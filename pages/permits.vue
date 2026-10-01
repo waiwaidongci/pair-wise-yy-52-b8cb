@@ -4,54 +4,94 @@ import type { Permit } from '~/types'
 
 const store = useOperationsStore()
 const route = useRoute()
-const selectedId = ref(String(route.query.id || store.permits[0]?.id))
+const selectedId = ref(String(route.query.id || store.permits[0]?.id || ''))
 const modal = ref(route.query.new === '1')
 const form = reactive({ title: '', device: '', crew: '电气一班', owner: '孙禾', window: '09-30 08:00 — 12:00', risk: '二级' as Permit['risk'] })
-const selected = computed(() => store.permits.find((item) => item.id === selectedId.value) ?? store.permits[0])
+const selected = computed(() => store.displayPermits.find((item) => item.id === selectedId.value) ?? store.displayPermits[0])
 const completed = computed(() => selected.value ? Math.round(selected.value.steps.filter((step) => step.done).length / selected.value.steps.length * 100) : 0)
 const statusIndex = computed(() => ['待复核', '待执行', '执行中', '待结束', '待关闭', '已完成'].indexOf(selected.value?.status ?? ''))
+const selectedConflicts = computed(() => store.activeConflicts.filter((note) => note.permitId === selectedId.value))
+const pointSharedWith = computed(() => {
+  const map = new Map<string, string[]>()
+  for (const permit of store.permits) {
+    for (const point of permit.isolationPoints) {
+      const list = map.get(point.id) ?? []
+      list.push(permit.id)
+      map.set(point.id, list)
+    }
+  }
+  return map
+})
 
-function createPermit() {
+async function createPermit() {
   if (!form.title.trim() || !form.device.trim()) return
   const permit: Permit = {
     id: `WP-${new Date().toISOString().slice(2, 10).replaceAll('-', '')}-${String(store.permits.length + 31).padStart(3, '0')}`,
     ...form, status: '待复核', revision: 1, reviewRequired: false,
-    isolationPoints: [{ id: `IP-${Date.now().toString().slice(-4)}`, device: form.device, label: '主隔离点', type: '开关', state: '待操作' }],
+    isolationPoints: [{ id: `IP-${Date.now().toString().slice(-4)}`, device: form.device, label: '主隔离点', type: '开关', state: '待操作', revision: 1 }],
     steps: [{ id: 'ST-31', text: '核对设备双重编号与工作范围', done: false, owner: form.owner }, { id: 'ST-32', text: '完成隔离、锁定、验电和接地', done: false, owner: form.owner }],
   }
-  store.addPermit(permit)
+  await store.addPermit(permit)
   selectedId.value = permit.id
   modal.value = false
+}
+
+async function advance() {
+  if (selected.value) await store.advancePermit(selected.value.id)
 }
 </script>
 
 <template>
   <div class="page">
-    <div class="head"><div><p class="eyebrow">许可全生命周期</p><h1 class="page-title">作业许可证</h1><p class="muted">从申请、复核到执行、结束和关闭，每一步留存负责人、时间、附件与现场确认。</p></div><UButton icon="i-heroicons-plus" color="primary" @click="modal = true">新建许可</UButton></div>
+    <div class="head"><div><p class="eyebrow">许可全生命周期 · 服务端唯一事实</p><h1 class="page-title">作业许可证</h1><p class="muted">每次提交携带所看到的版本号与唯一操作号；版本过期只驳回受影响许可，其他提交照常生效。</p></div><UButton icon="i-heroicons-plus" color="primary" @click="modal = true">新建许可</UButton></div>
+
+    <UAlert v-if="store.connection !== '在线'" class="mb-4" :color="store.connection === '提交中' ? 'blue' : 'amber'" variant="soft" :icon="store.connection === '提交中' ? 'i-heroicons-arrow-path' : 'i-heroicons-wifi-off'" :title="store.connection === '提交中' ? '正在向服务端提交操作' : '网络中断，操作进入待提交队列'" :description="store.lastError || '已确认项之后的操作将在恢复后按原操作号重发，服务端幂等处理，不会重复写入。'">
+      <template v-if="store.pendingRetry" #actions><UButton size="xs" color="amber" variant="solid" @click="store.retryPending()">立即重试 {{ store.pendingRetry }} 项</UButton></template>
+    </UAlert>
+
+    <UAlert v-if="store.activeConflicts.length" class="mb-4" color="red" variant="soft" icon="i-heroicons-exclamation-triangle" title="存在被驳回 / 待值班负责人重新确认的操作" description="冲突只影响下列许可，其余许可可继续处理；重新确认前请勿重复提交原操作。">
+      <div class="conflict-list">
+        <div v-for="note in store.activeConflicts.slice(0, 4)" :key="note.opId" class="conflict-row">
+          <div><b>{{ note.permitId }}</b><small>{{ note.at }} · {{ note.message }}</small></div>
+          <span class="inline">
+            <UButton size="xs" color="red" variant="solid" icon="i-heroicons-user-check" @click="selectedId = note.permitId">前往重新确认</UButton>
+            <UButton size="xs" color="gray" variant="ghost" @click="store.dismissConflict(note.opId)">知道了</UButton>
+          </span>
+        </div>
+      </div>
+    </UAlert>
+
     <div class="permit-layout">
       <aside class="panel permit-list">
-        <button v-for="permit in store.permits" :key="permit.id" :class="{ active: permit.id === selectedId }" @click="selectedId = permit.id"><span><b>{{ permit.id }}</b><small>{{ permit.title }}</small></span><UBadge :color="permit.reviewRequired ? 'red' : 'amber'" variant="subtle">{{ permit.reviewRequired ? '冲突' : permit.status }}</UBadge></button>
+        <button v-for="permit in store.displayPermits" :key="permit.id" :class="{ active: permit.id === selectedId }" @click="selectedId = permit.id"><span><b>{{ permit.id }}</b><small>{{ permit.title }}</small></span><span class="inline" style="gap:4px"><UBadge v-if="permit.pending || store.pendingPermitIds.has(permit.id)" color="blue" variant="soft">待同步</UBadge><UBadge :color="permit.reviewRequired ? 'red' : 'amber'" variant="subtle">{{ permit.reviewRequired ? '冲突' : permit.status }}</UBadge></span></button>
       </aside>
       <section v-if="selected" class="grid detail-grid">
         <article class="panel p-4">
-          <div class="detail-head"><div><small class="muted">{{ selected.id }} · 修订 r{{ selected.revision }}</small><h2>{{ selected.title }}</h2><p>{{ selected.device }} · {{ selected.window }}</p></div><UBadge size="lg" :color="selected.reviewRequired ? 'red' : 'green'" variant="subtle">{{ selected.reviewRequired ? '待复核' : selected.status }}</UBadge></div>
+          <div class="detail-head"><div><small class="muted">{{ selected.id }} · 修订 r{{ selected.revision }}<template v-if="store.pendingPermitIds.has(selected.id)"> · 有操作待服务端确认</template></small><h2>{{ selected.title }}</h2><p>{{ selected.device }} · {{ selected.window }}</p></div><UBadge size="lg" :color="selected.reviewRequired ? 'red' : 'green'" variant="subtle">{{ selected.reviewRequired ? '失效待复核' : selected.status }}</UBadge></div>
           <div class="flow"><div v-for="(step,index) in ['申请','复核','执行','结束','关闭']" :key="step" :class="{ done: index <= statusIndex, current: index === statusIndex }"><i>{{ index + 1 }}</i><span>{{ step }}</span></div></div>
-          <UAlert v-if="selected.reviewRequired" color="red" variant="soft" title="设备状态变化触发复核" description="共用隔离点或相关设备状态已发生变化，关闭该许可前必须由值班负责人重新确认。" />
+
+          <UAlert v-if="selected.invalidReason || selected.reviewRequired" color="red" variant="soft" title="许可已失效，等待值班负责人重新确认" :description="selected.invalidReason || '共用隔离点或相关设备状态已发生变化，关闭该许可前必须由值班负责人重新确认。'">
+            <template #actions><UButton size="sm" color="red" variant="solid" icon="i-heroicons-shield-check" :loading="store.inflight" @click="store.reconfirm(selected.id)">值班负责人重新确认（基于 r{{ selected.revision }}）</UButton></template>
+          </UAlert>
+          <UAlert v-for="note in selectedConflicts" :key="note.opId" class="mt-2" color="amber" variant="soft" :title="`操作被驳回：${note.code}`" :description="note.message">
+            <template #actions><UButton size="xs" variant="ghost" @click="store.dismissConflict(note.opId)">关闭提示</UButton></template>
+          </UAlert>
+
           <h3>操作步骤</h3>
-          <div v-for="step in selected.steps" :key="step.id" class="step"><UCheckbox :model-value="step.done" @update:model-value="store.toggleStep(selected.id, step.id)" /><div><b :class="{ completed: step.done }">{{ step.text }}</b><small>责任人 {{ step.owner }} · {{ step.evidence || '尚未上传证据' }}</small></div><UButton size="xs" variant="ghost" icon="i-heroicons-camera">证据</UButton></div>
+          <div v-for="step in selected.steps" :key="step.id" class="step"><UCheckbox :model-value="step.done" :disabled="!!selected.pending" @update:model-value="store.toggleStep(selected.id, step.id)" /><div><b :class="{ completed: step.done }">{{ step.text }}</b><small>责任人 {{ step.owner }} · {{ step.evidence || '尚未上传证据' }}</small></div><UButton size="xs" variant="ghost" icon="i-heroicons-camera">证据</UButton></div>
           <UProgress :value="completed" class="mt-4" /><div class="inline justify-between mt-1"><span class="muted">步骤完成度</span><b>{{ completed }}%</b></div>
         </article>
         <aside class="grid right">
-          <article class="panel p-4"><h3>隔离点与锁定</h3><div v-for="point in selected.isolationPoints" :key="point.id" class="point"><span><b>{{ point.label }}</b><small>{{ point.device }} · {{ point.type }}</small></span><UBadge :color="point.state === '已隔离' ? 'green' : 'amber'" variant="subtle">{{ point.state }}</UBadge></div></article>
-          <article class="panel p-4"><h3>流程操作</h3><p class="muted">推进前系统重新检查隔离冲突、跨班组重叠与未完成交接。</p><UButton block color="primary" icon="i-heroicons-arrow-right-circle" @click="store.advancePermit(selected.id)">推进到下一状态</UButton><UButton block class="mt-2" color="gray" variant="outline" icon="i-heroicons-arrow-uturn-left">退回补件</UButton><UButton block class="mt-2" color="red" variant="soft" icon="i-heroicons-exclamation-triangle">申请紧急暂停</UButton></article>
+          <article class="panel p-4"><h3>隔离点与锁定</h3><div v-for="point in selected.isolationPoints" :key="point.id" class="point"><span><b>{{ point.label }}</b><small>{{ point.device }} · {{ point.type }} · 版本 p{{ point.revision }}<template v-if="(pointSharedWith.get(point.id)?.length ?? 0) > 1"> · 共享于 {{ pointSharedWith.get(point.id)!.filter((id) => id !== selected.id).join('、') }}</template></small></span><span class="inline" style="gap:6px"><UBadge :color="point.state === '已隔离' ? 'green' : point.state === '已恢复' ? 'gray' : 'amber'" variant="subtle">{{ point.state }}</UBadge><UButton v-if="!selected.pending" size="xs" variant="outline" :disabled="selected.reviewRequired" @click="store.setPointState(selected.id, point.id, point.state === '待操作' ? '已隔离' : point.state === '已隔离' ? '已恢复' : '待操作')">{{ point.state === '待操作' ? '隔离' : point.state === '已隔离' ? '恢复' : '重隔离' }}</UButton></span></div><p class="muted" style="font-size:12px;margin-top:8px">隔离点状态一经提交，共享它的其他许可立即失效并等待值班负责人复核。</p></article>
+          <article class="panel p-4"><h3>流程操作</h3><p class="muted">推进前服务端重新校验版本、隔离冲突、跨班组重叠与未完成交接。</p><UButton block color="primary" icon="i-heroicons-arrow-right-circle" :loading="store.inflight" :disabled="selected.reviewRequired || !!selected.pending" @click="advance">推进到下一状态</UButton><UButton block class="mt-2" color="gray" variant="outline" icon="i-heroicons-arrow-uturn-left" :disabled="selected.reviewRequired">退回补件</UButton><UButton block class="mt-2" color="red" variant="soft" icon="i-heroicons-exclamation-triangle">申请紧急暂停</UButton></article>
         </aside>
       </section>
     </div>
-    <UModal v-model="modal"><article class="p-5"><h2>申请作业许可</h2><p class="muted">提交后进入安全复核，设备隔离冲突会在提交时自动校验。</p><div class="form-grid"><UFormGroup label="作业名称"><UInput v-model="form.title" /></UFormGroup><UFormGroup label="设备编号"><UInput v-model="form.device" /></UFormGroup><UFormGroup label="班组"><UInput v-model="form.crew" /></UFormGroup><UFormGroup label="负责人"><UInput v-model="form.owner" /></UFormGroup><UFormGroup label="计划窗口"><UInput v-model="form.window" /></UFormGroup><UFormGroup label="风险等级"><USelect v-model="form.risk" :options="['一级','二级','三级']" /></UFormGroup></div><div class="inline justify-end mt-4"><UButton color="gray" @click="modal = false">取消</UButton><UButton color="primary" :disabled="!form.title || !form.device" @click="createPermit">提交复核</UButton></div></article></UModal>
+    <UModal v-model="modal"><article class="p-5"><h2>申请作业许可</h2><p class="muted">提交后由服务端保存并进入安全复核，设备隔离冲突会在提交时自动校验。</p><div class="form-grid"><UFormGroup label="作业名称"><UInput v-model="form.title" /></UFormGroup><UFormGroup label="设备编号"><UInput v-model="form.device" /></UFormGroup><UFormGroup label="班组"><UInput v-model="form.crew" /></UFormGroup><UFormGroup label="负责人"><UInput v-model="form.owner" /></UFormGroup><UFormGroup label="计划窗口"><UInput v-model="form.window" /></UFormGroup><UFormGroup label="风险等级"><USelect v-model="form.risk" :options="['一级','二级','三级']" /></UFormGroup></div><div class="inline justify-end mt-4"><UButton color="gray" @click="modal = false">取消</UButton><UButton color="primary" :loading="store.inflight" :disabled="!form.title || !form.device" @click="createPermit">提交复核</UButton></div></article></UModal>
   </div>
 </template>
 
 <style scoped>
-.head{display:flex;justify-content:space-between;gap:16px;margin-bottom:18px}.head h1{margin:3px 0 7px}.head p{margin:0}.eyebrow{font-size:12px;color:#2563eb;font-weight:700}.permit-layout{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px}.permit-list{padding:8px;height:fit-content}.permit-list button{width:100%;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px 11px;border:0;background:transparent;border-radius:7px;text-align:left;color:inherit;cursor:pointer}.permit-list button:hover,.permit-list button.active{background:#eff6ff}.permit-list b,.permit-list small{display:block}.permit-list small{color:#667085;margin-top:4px;font-size:12px}.detail-grid{grid-template-columns:minmax(0,1.5fr) minmax(280px,.65fr);gap:16px}.right{height:fit-content;gap:14px}.detail-head{display:flex;justify-content:space-between;gap:10px;margin-bottom:16px}.detail-head h2{margin:4px 0}.detail-head p{margin:0;color:#667085}.flow{display:grid;grid-template-columns:repeat(5,1fr);margin:20px 0}.flow>div{position:relative;text-align:center;color:#94a3b8}.flow>div:after{content:"";position:absolute;left:55%;right:-45%;top:13px;height:2px;background:#e2e8f0}.flow>div:last-child:after{display:none}.flow i{position:relative;z-index:1;display:grid;place-items:center;width:28px;height:28px;margin:auto;border-radius:50%;background:#e2e8f0;font-style:normal;font-size:12px}.flow span{display:block;font-size:12px;margin-top:5px}.flow .done{color:#2563eb}.flow .done i{background:#2563eb;color:#fff}.flow .done:after{background:#2563eb}.panel h3{font-size:15px;margin:18px 0 10px}.step{display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid #edf0f5}.step div{flex:1}.step small{display:block;color:#667085;margin-top:4px}.step .completed{text-decoration:line-through;color:#667085}.point{display:flex;justify-content:space-between;padding:11px 0;border-bottom:1px solid #edf0f5}.point b,.point small{display:block}.point small{color:#667085;margin-top:4px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}.mt-2{margin-top:8px}
-@media(max-width:980px){.permit-layout{grid-template-columns:1fr}.permit-list{display:flex;overflow:auto}.permit-list button{min-width:230px}.detail-grid{grid-template-columns:1fr}}@media(max-width:620px){.head{flex-direction:column}.form-grid{grid-template-columns:1fr}}
+.head{display:flex;justify-content:space-between;gap:16px;margin-bottom:18px}.head h1{margin:3px 0 7px}.head p{margin:0}.eyebrow{font-size:12px;color:#2563eb;font-weight:700}.permit-layout{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px}.permit-list{padding:8px;height:fit-content}.permit-list button{width:100%;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px 11px;border:0;background:transparent;border-radius:7px;text-align:left;color:inherit;cursor:pointer}.permit-list button:hover,.permit-list button.active{background:#eff6ff}.permit-list b,.permit-list small{display:block}.permit-list small{color:#667085;margin-top:4px;font-size:12px}.detail-grid{grid-template-columns:minmax(0,1.5fr) minmax(280px,.65fr);gap:16px}.right{height:fit-content;gap:14px}.detail-head{display:flex;justify-content:space-between;gap:10px;margin-bottom:16px}.detail-head h2{margin:4px 0}.detail-head p{margin:0;color:#667085}.flow{display:grid;grid-template-columns:repeat(5,1fr);margin:20px 0}.flow>div{position:relative;text-align:center;color:#94a3b8}.flow>div:after{content:"";position:absolute;left:55%;right:-45%;top:13px;height:2px;background:#e2e8f0}.flow>div:last-child:after{display:none}.flow i{position:relative;z-index:1;display:grid;place-items:center;width:28px;height:28px;margin:auto;border-radius:50%;background:#e2e8f0;font-style:normal;font-size:12px}.flow span{display:block;font-size:12px;margin-top:5px}.flow .done{color:#2563eb}.flow .done i{background:#2563eb;color:#fff}.flow .done:after{background:#2563eb}.panel h3{font-size:15px;margin:18px 0 10px}.step{display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid #edf0f5}.step div{flex:1}.step small{display:block;color:#667085;margin-top:4px}.step .completed{text-decoration:line-through;color:#667085}.point{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:11px 0;border-bottom:1px solid #edf0f5}.point b,.point small{display:block}.point small{color:#667085;margin-top:4px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}.mt-2{margin-top:8px}.conflict-list{display:grid;gap:8px;margin-top:8px}.conflict-row{display:flex;justify-content:space-between;align-items:center;gap:10px;background:#fff;border:1px solid #fecaca;border-radius:8px;padding:8px 10px}.conflict-row b,.conflict-row small{display:block}.conflict-row small{color:#7f1d1d;margin-top:3px;font-size:12px}
+@media(max-width:980px){.permit-layout{grid-template-columns:1fr}.permit-list{display:flex;overflow:auto}.permit-list button{min-width:230px}.detail-grid{grid-template-columns:1fr}}@media(max-width:620px){.head{flex-direction:column}.form-grid{grid-template-columns:1fr}.conflict-row{flex-direction:column;align-items:flex-start}}
 </style>
